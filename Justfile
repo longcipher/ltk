@@ -77,6 +77,7 @@ setup:
   cargo install cargo-shear
   cargo install cargo-sort
   cargo install typos-cli
+  cargo install rumdl
 
 # Generate documentation for the workspace
 docs:
