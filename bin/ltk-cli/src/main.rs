@@ -21,31 +21,7 @@ use eyre::Result;
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
-}
 
-#[derive(Debug, Subcommand)]
-enum Commands {
-    /// Count tokens in raw vs compressed files using HuggingFace BPE.
-    ///
-    /// Trains a BPE tokenizer on the raw files, then counts tokens in both
-    /// raw and compressed files and reports savings.
-    #[cfg(feature = "token-counter")]
-    TokenCounter {
-        /// Raw input files (used for training the tokenizer).
-        #[arg(required = true)]
-        raw: Vec<PathBuf>,
-
-        /// Separator between raw and compressed file lists.
-        /// Must be "--" followed by compressed files.
-        /// If omitted, only raw files are tokenized.
-        #[arg(long)]
-        compressed: Vec<PathBuf>,
-    },
-}
-
-/// Top-level CLI arguments when no subcommand is given (pipeline mode).
-#[derive(Debug, Parser)]
-struct PipelineArgs {
     /// Output format.
     #[arg(short, long, value_enum, default_value_t = Format::Compact)]
     format: Format,
@@ -86,6 +62,24 @@ struct PipelineArgs {
 
     /// Input log files. Reads from stdin if none are provided.
     files: Vec<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    /// Count tokens in raw vs compressed files using HuggingFace BPE.
+    ///
+    /// Trains a BPE tokenizer on the raw files, then counts tokens in both
+    /// raw and compressed files and reports savings.
+    #[cfg(feature = "token-counter")]
+    TokenCounter {
+        /// Raw input files (used for training the tokenizer).
+        #[arg(required = true)]
+        raw: Vec<PathBuf>,
+
+        /// Compressed files to compare against raw.
+        #[arg(long)]
+        compressed: Vec<PathBuf>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -134,18 +128,18 @@ fn main() -> Result<()> {
         }
     }
 
-    run_pipeline(PipelineArgs::parse_from(std::env::args_os()))
+    run_pipeline(&cli)
 }
 
-fn run_pipeline(args: PipelineArgs) -> Result<()> {
+fn run_pipeline(cli: &Cli) -> Result<()> {
     // Collect input lines from stdin or files.
-    let lines: Vec<String> = if args.files.is_empty() {
+    let lines: Vec<String> = if cli.files.is_empty() {
         let mut buf = String::new();
         io::stdin().read_to_string(&mut buf)?;
         buf.lines().map(str::to_owned).collect()
     } else {
         let mut all = Vec::new();
-        for path in &args.files {
+        for path in &cli.files {
             let content = std::fs::read_to_string(path)?;
             all.extend(content.lines().map(str::to_owned));
         }
@@ -154,17 +148,16 @@ fn run_pipeline(args: PipelineArgs) -> Result<()> {
 
     // Build pipeline components.
     let normalizer = ltk_core::RegexNormalizer::new()?;
-    let clusterer = ltk_core::JaccardClusterer::with_params(args.threshold, args.window);
-    let format: ltk_core::OutputFormat = args.format.into();
+    let clusterer = ltk_core::JaccardClusterer::with_params(cli.threshold, cli.window);
+    let format: ltk_core::OutputFormat = cli.format.into();
     let formatter = formatter_for(format);
 
-    let pipeline = ltk_core::Pipeline::new(normalizer, clusterer, formatter)
-        .with_target_rate(args.target_rate);
+    let pipeline =
+        ltk_core::Pipeline::new(normalizer, clusterer, formatter).with_target_rate(cli.target_rate);
 
     // Stage 2: attach neural compressor if requested (re-bind to avoid unused mut).
     #[cfg(feature = "llmlingua-onnx")]
-    let pipeline = if let (Some(model), Some(tokenizer)) = (&args.onnx_model, &args.onnx_tokenizer)
-    {
+    let pipeline = if let (Some(model), Some(tokenizer)) = (&cli.onnx_model, &cli.onnx_tokenizer) {
         let comp = std::sync::Arc::new(ltk_core::OnnxCompressor::new(model, tokenizer));
         pipeline.with_compressor(comp)
     } else {
@@ -172,7 +165,7 @@ fn run_pipeline(args: PipelineArgs) -> Result<()> {
     };
 
     #[cfg(feature = "llmlingua-rpc")]
-    let pipeline = if let Some(endpoint) = &args.rpc_endpoint {
+    let pipeline = if let Some(endpoint) = &cli.rpc_endpoint {
         let comp = std::sync::Arc::new(ltk_core::RpcCompressor::new(endpoint)?);
         pipeline.with_compressor(comp)
     } else {
@@ -185,7 +178,7 @@ fn run_pipeline(args: PipelineArgs) -> Result<()> {
     println!("{output}");
 
     // Emit stats to stderr if requested.
-    if args.stats {
+    if cli.stats {
         eprintln!("--- ltk stats ---");
         eprintln!("raw lines:       {}", stats.raw_lines);
         eprintln!("raw bytes:       {}", stats.raw_bytes);
