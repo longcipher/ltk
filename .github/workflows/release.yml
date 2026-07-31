@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+env:
+  CARGO_TERM_COLOR: always
+  RUSTC_WRAPPER: ""
+
 jobs:
   release:
     name: Release
