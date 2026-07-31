@@ -1,0 +1,26 @@
+[package]
+name = "ltk-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Less Token — cascade log compression CLI"
+repository.workspace = true
+
+[[bin]]
+name = "ltk"
+path = "src/main.rs"
+
+[features]
+llmlingua-onnx = ["ltk-core/llmlingua-onnx"]
+llmlingua-rpc = ["ltk-core/llmlingua-rpc"]
+token-counter = ["dep:tokenizers"]
+
+[dependencies]
+clap = { workspace = true, features = ["derive"] }
+eyre = { workspace = true }
+ltk-core = { path = "../../crates/ltk-core" }
+tokenizers = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

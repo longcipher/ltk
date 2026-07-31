@@ -1,0 +1,64 @@
+[package]
+name = "ltk-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Less Token — cascade log compression core library (normalizer, clusterer, formatter, pipeline, optional LLMLingua neural pruning) for LLM/agent contexts."
+repository.workspace = true
+keywords = ["llm", "logs", "compression", "llmlingua", "token"]
+categories = ["command-line-utilities", "text-processing"]
+
+[features]
+# Fast rule-based mode: Normalizer + Clusterer + Formatter only (zero model, < 5 ms overhead).
+default = []
+
+# Accurate token counting backed by tiktoken (cl100k_base, matches LLMLingua's gpt-3.5-turbo encoding).
+tiktoken = ["dep:tiktoken-rs"]
+
+# Stage 2 neural semantic pruning via a local ONNX Runtime token-classification model.
+llmlingua-onnx = ["dep:ort", "dep:tokenizers"]
+
+# Stage 2 neural semantic pruning via a remote LLMLingua daemon over HTTP.
+# `hpx` is async-only, so a dedicated tokio runtime bridges the sync
+# `SemanticCompressor::compress` trait method to hpx's async request future.
+llmlingua-rpc = ["dep:hpx", "dep:serde_json", "dep:tokio"]
+
+[dependencies]
+# Core (default feature): types, traits, pipeline scaffolding.
+ahash = { workspace = true }
+compact_str = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+strip-ansi-escapes = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# Optional: accurate OpenAI-style token counting (Stage 2 savings stats).
+tiktoken-rs = { workspace = true, optional = true }
+
+# Optional: Stage 2 local neural compression via ONNX Runtime (LLMLingua-2 style).
+ort = { workspace = true, optional = true }
+tokenizers = { workspace = true, optional = true }
+
+# Optional: Stage 2 remote neural compression via a local LLMLingua HTTP daemon.
+hpx = { workspace = true, optional = true, features = ["json"] }
+serde_json = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["rt", "net", "time"] }
+
+[dev-dependencies]
+cucumber = { workspace = true }
+proptest = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true
+
+[[test]]
+name = "pipeline-bdd"
+harness = false
+test = false
+
+[[test]]
+name = "checkout-bdd"
+harness = false
+test = false
