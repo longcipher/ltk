@@ -26,12 +26,7 @@ lint:
 test:
   cargo test --all-features
 
-# Run BDD scenarios
-bdd:
-  cargo test -p ltk-core --test checkout-bdd
-  cargo test -p ltk-core --test pipeline-bdd
 
-# Run both TDD and BDD suites
 test-all:
   cargo test --all-features
   cargo test -p ltk-core --test checkout-bdd

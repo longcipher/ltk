@@ -105,7 +105,6 @@ features/
 
 ```bash
 just test       # unit tests + property tests
-just bdd        # BDD scenarios
 just test-all   # everything
 just lint       # clippy + typos + cargo shear
 just format     # rustfmt + cargo sort
