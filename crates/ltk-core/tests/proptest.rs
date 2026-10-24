@@ -59,6 +59,23 @@ proptest! {
     }
 
     #[test]
+    fn clusterer_accounts_for_every_line_under_eviction(
+        lines in prop::collection::vec("[a-z]{4,20}", 1..60)
+    ) {
+        let n = norm()?;
+        // Window of 1 forces an eviction with no surviving cluster to merge
+        // into on every new cluster.
+        let mut clusterer = JaccardClusterer::with_params(1.0, 1);
+        for line in &lines {
+            clusterer.ingest(n.normalize(line));
+        }
+        let lost = clusterer.lost_lines();
+        let clusters = clusterer.finish();
+        let total: u64 = clusters.iter().map(|c| c.count).sum();
+        prop_assert_eq!(total + lost, lines.len() as u64);
+    }
+
+    #[test]
     fn clusterer_preserves_total_line_count(
         lines in prop::collection::vec("[a-z ]{1,50}", 1..30)
     ) {

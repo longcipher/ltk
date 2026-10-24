@@ -8,6 +8,12 @@
 //! informative), always preserving special tokens (`<s>`, `</s>`, …) so the
 //! decoded output stays well-formed.
 //!
+//! [`Session::builder`] in this `ort` version requires an explicit
+//! [`Environment`]. ONNX Runtime allows **one environment per process**, so the
+//! environment is created lazily once behind a process-wide `OnceLock` and shared
+//! by every [`OnnxCompressor`] instance. A second attempt to build one never
+//! happens; callers reuse the stored handle.
+//!
 //! ## Lazy init
 //!
 //! The ONNX session and tokenizer are heavy; they load lazily on the first
@@ -21,7 +27,7 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-use ort::{session::Session, value::Tensor};
+use ort::{environment::Environment, session::Session, value::Tensor};
 use tokenizers::Tokenizer;
 
 use crate::{LtkError, SemanticCompressor};
@@ -35,6 +41,23 @@ const MAX_SEQ_LEN: usize = 512;
 /// Index of the "drop" class in the model's per-token 2-class logits. LLMLingua-2
 /// labels `1 = drop`, `0 = keep`.
 const DROP_CLASS: usize = 1;
+
+/// Process-wide ONNX Runtime environment. ONNX Runtime rejects a second
+/// environment in the same process, so it is created exactly once and shared.
+static ENVIRONMENT: OnceLock<Environment> = OnceLock::new();
+
+/// Return the process-wide ONNX Runtime [`Environment`], creating it on first use.
+fn environment() -> Result<&'static Environment, LtkError> {
+    if let Some(env) = ENVIRONMENT.get() {
+        return Ok(env);
+    }
+    let env = ort::init()
+        .with_name("ltk-core")
+        .build()
+        .map_err(|e| LtkError::Onnx(format!("environment init failed: {e}")))?;
+    // `get_or_init` is race-free; a losing racer reuses the winner's environment.
+    Ok(ENVIRONMENT.get_or_init(|| env))
+}
 
 /// Neural semantic compressor backed by an ONNX Runtime session + HF tokenizer.
 ///
@@ -111,7 +134,8 @@ impl OnnxCompressor {
             .lock()
             .map_err(|e| LtkError::Onnx(format!("session lock poisoned: {e}")))?;
         if guard.is_none() {
-            let session = Session::builder()
+            let env = environment()?;
+            let session = Session::builder(env)
                 .map_err(|e| LtkError::Onnx(format!("session builder: {e}")))?
                 .commit_from_file(&self.model_path)
                 .map_err(|e| LtkError::Onnx(format!("session load failed: {e}")))?;

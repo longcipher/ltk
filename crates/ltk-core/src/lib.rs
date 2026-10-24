@@ -30,9 +30,10 @@
 //! | `llmlingua-onnx`  | no      | Stage 2 local neural pruning via ONNX Runtime.         |
 //! | `llmlingua-rpc`   | no      | Stage 2 remote neural pruning via an HTTP daemon.      |
 //!
-//! Phase 1 ships the trait contracts and pipeline scaffolding; concrete
-//! `Normalizer` / `Clusterer` / `Formatter` / `SemanticCompressor` implementations
-//! land in later phases.
+//! Every stage ships with a default implementation: [`RegexNormalizer`] (Stage 0),
+//! [`JaccardClusterer`] (Stage 1), [`CompactFormatter`] and friends (Stage 3), plus
+//! the two optional Stage 2 backends (`OnnxCompressor` / `RpcCompressor`) behind
+//! their feature flags. Exact token accounting is opt-in through [`TokenCounter`].
 
 use std::{borrow::Cow, sync::Arc};
 
@@ -208,10 +209,24 @@ pub trait Normalizer: Send + Sync {
 ///
 /// The clusterer owns the live cluster state. [`ingest`](Self::ingest) accepts a
 /// borrowed [`NormalizedLine`] of any lifetime and copies what it needs to keep;
+/// [`lost_lines`](Self::lost_lines) reports lines that could not be kept, and
 /// [`finish`](Self::finish) consumes the clusterer and returns the final clusters.
+///
+/// # Line accounting
+///
+/// For every ingested line, the invariant
+/// `sum(cluster.count) + clusterer.lost_lines() == ingested` must hold. A
+/// clusterer that evicts a cluster with no surviving neighbor to merge into
+/// reports those lines through [`lost_lines`](Self::lost_lines) rather than
+/// dropping them.
 pub trait Clusterer {
     /// Ingest one normalized line.
     fn ingest(&mut self, line: NormalizedLine<'_>);
+
+    /// Number of ingested lines that are not represented by any live cluster,
+    /// because their cluster was evicted with no surviving cluster to merge
+    /// into. `0` for clusterers that never evict.
+    fn lost_lines(&self) -> u64;
 
     /// Finalize and return all clusters.
     fn finish(self) -> Vec<LogCluster>;
@@ -239,6 +254,22 @@ pub trait Formatter {
 impl Formatter for Box<dyn Formatter> {
     fn format(&self, clusters: &[LogCluster]) -> String {
         (**self).format(clusters)
+    }
+}
+
+/// Counts tokens in a text span, used by [`Pipeline`] to fill [`Stats`].
+///
+/// Without a counter the pipeline uses [`estimate_tokens`] (a 4-bytes-per-token
+/// heuristic). With the `tiktoken` feature, [`tiktoken::TiktokenCounter`] provides
+/// exact OpenAI `cl100k_base` counts for the savings report.
+pub trait TokenCounter: Send + Sync {
+    /// Number of tokens in `text`.
+    fn count(&self, text: &str) -> u64;
+}
+
+impl<T: TokenCounter + ?Sized> TokenCounter for Arc<T> {
+    fn count(&self, text: &str) -> u64 {
+        (**self).count(text)
     }
 }
 
@@ -289,6 +320,19 @@ pub const fn estimate_tokens(text: &str) -> usize {
     text.len().div_ceil(4)
 }
 
+/// The default [`TokenCounter`]: the byte-length heuristic [`estimate_tokens`].
+///
+/// This is what [`Pipeline`] uses when no counter is attached via
+/// [`Pipeline::with_token_counter`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HeuristicCounter;
+
+impl TokenCounter for HeuristicCounter {
+    fn count(&self, text: &str) -> u64 {
+        u64::try_from(estimate_tokens(text)).unwrap_or(u64::MAX)
+    }
+}
+
 /// Token-savings statistics reported by `--stats` (raw vs Stage 1 vs Stage 1+2).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Stats {
@@ -298,14 +342,18 @@ pub struct Stats {
     pub raw_bytes: u64,
     /// Number of clusters emitted by Stage 1.
     pub cluster_count: usize,
-    /// Estimated tokens in the raw input.
+    /// Tokens in the raw input: [`estimate_tokens`] by default, exact counts when a
+    /// [`TokenCounter`] is attached.
     pub raw_tokens: u64,
-    /// Estimated tokens in the Stage 1 output (rule-based clustering).
+    /// Tokens in the Stage 1 output (rule-based clustering).
     pub stage1_tokens: u64,
-    /// Estimated tokens in the Stage 1+2 output (with neural pruning), if Stage 2 ran.
+    /// Tokens in the Stage 1+2 output (with neural pruning), if Stage 2 ran.
     pub stage2_tokens: Option<u64>,
-    /// Number of lines whose cluster was evicted and could not be merged
-    /// (only nonzero when `--window` is set and a cluster has no surviving neighbor).
+    /// Number of input lines not represented by any emitted cluster, because
+    /// their cluster was evicted with no surviving neighbor to merge into
+    /// (only nonzero when the window is set to `1`).
+    ///
+    /// `sum(cluster counts) + lost_lines == raw_lines` always holds.
     pub lost_lines: u64,
 }
 
@@ -358,6 +406,7 @@ impl Stats {
 /// # }
 /// # struct C; impl Clusterer for C {
 /// #   fn ingest(&mut self, _l: NormalizedLine<'_>) {}
+/// #   fn lost_lines(&self) -> u64 { 0 }
 /// #   fn finish(self) -> Vec<LogCluster> { Vec::new() }
 /// # }
 /// # struct F; impl Formatter for F { fn format(&self, _c: &[LogCluster]) -> String { String::new() } }
@@ -371,6 +420,7 @@ pub struct Pipeline<N, C, F> {
     clusterer: C,
     formatter: F,
     compressor: Option<Arc<dyn SemanticCompressor>>,
+    counter: Option<Arc<dyn TokenCounter>>,
     target_rate: f32,
 }
 
@@ -378,7 +428,7 @@ impl<N, C, F> Pipeline<N, C, F> {
     /// Build a rule-based pipeline (Stage 0 + 1 + 3) from its three components.
     #[must_use]
     pub fn new(normalizer: N, clusterer: C, formatter: F) -> Self {
-        Self { normalizer, clusterer, formatter, compressor: None, target_rate: 0.5 }
+        Self { normalizer, clusterer, formatter, compressor: None, counter: None, target_rate: 0.5 }
     }
 
     /// Attach a Stage 2 neural [`SemanticCompressor`] (e.g. an `OnnxCompressor` or
@@ -386,6 +436,16 @@ impl<N, C, F> Pipeline<N, C, F> {
     #[must_use]
     pub fn with_compressor(mut self, compressor: Arc<dyn SemanticCompressor>) -> Self {
         self.compressor = Some(compressor);
+        self
+    }
+
+    /// Attach a [`TokenCounter`] used for the `--stats` token accounting.
+    ///
+    /// Without a counter the pipeline falls back to [`HeuristicCounter`] (the
+    /// [`estimate_tokens`] byte heuristic).
+    #[must_use]
+    pub fn with_token_counter(mut self, counter: Arc<dyn TokenCounter>) -> Self {
+        self.counter = Some(counter);
         self
     }
 
@@ -410,7 +470,9 @@ impl<N, C, F> Pipeline<N, C, F> {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let Self { normalizer, mut clusterer, formatter, compressor, target_rate } = self;
+        let Self { normalizer, mut clusterer, formatter, compressor, counter, target_rate } = self;
+        // Fall back to the byte heuristic when no exact counter was attached.
+        let counter: Arc<dyn TokenCounter> = counter.unwrap_or_else(|| Arc::new(HeuristicCounter));
 
         let mut raw_lines: u64 = 0;
         let mut raw_bytes: u64 = 0;
@@ -420,17 +482,19 @@ impl<N, C, F> Pipeline<N, C, F> {
             let raw = line.as_ref();
             raw_lines += 1;
             raw_bytes += u64::try_from(raw.len()).unwrap_or(u64::MAX);
-            raw_tokens += u64::try_from(estimate_tokens(raw)).unwrap_or(u64::MAX);
+            raw_tokens += counter.count(raw);
             let normalized = normalizer.normalize(raw);
             clusterer.ingest(normalized);
         }
         // Normalizer is no longer needed; released at scope end.
 
+        // Read the loss counter before `finish` consumes the clusterer.
+        let lost_lines = clusterer.lost_lines();
         let clusters = clusterer.finish();
         let cluster_count = clusters.len();
 
         let stage1_output = formatter.format(&clusters);
-        let stage1_tokens = u64::try_from(estimate_tokens(&stage1_output)).unwrap_or(u64::MAX);
+        let stage1_tokens = counter.count(&stage1_output);
 
         let (final_output, stage2_tokens) = match &compressor {
             Some(comp) => {
@@ -445,7 +509,7 @@ impl<N, C, F> Pipeline<N, C, F> {
                     cluster.template = comp.compress(&cluster.template, target_rate)?;
                 }
                 let out = formatter.format(&compressed);
-                let tokens = u64::try_from(estimate_tokens(&out)).unwrap_or(u64::MAX);
+                let tokens = counter.count(&out);
                 (out, Some(tokens))
             }
             None => (stage1_output, None),
@@ -458,7 +522,7 @@ impl<N, C, F> Pipeline<N, C, F> {
             raw_tokens,
             stage1_tokens,
             stage2_tokens,
-            lost_lines: 0,
+            lost_lines,
         };
         tracing::trace!(target: "ltk::pipeline", ?stats, "pipeline complete");
         Ok((final_output, stats))
@@ -485,6 +549,32 @@ pub mod tiktoken {
 
     /// Token counter backed by tiktoken's `cl100k_base` BPE (matches LLMLingua's
     /// `gpt-3.5-turbo` encoding used for token-length weighting).
+    ///
+    /// Pass it to [`Pipeline::with_token_counter`](crate::Pipeline::with_token_counter)
+    /// to make [`crate::Stats`] report exact OpenAI token counts:
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use ltk_core::{Pipeline, TokenCounter, tiktoken::TiktokenCounter};
+    /// # use ltk_core::{Clusterer, Formatter, LogCluster, Normalizer, NormalizedLine};
+    /// # struct N; impl Normalizer for N {
+    /// #   fn normalize<'a>(&self, raw: &'a str) -> NormalizedLine<'a> {
+    /// #     NormalizedLine::new(raw, std::borrow::Cow::Borrowed(raw), Vec::new())
+    /// #   }
+    /// # }
+    /// # struct C; impl Clusterer for C {
+    /// #   fn ingest(&mut self, _l: NormalizedLine<'_>) {}
+    /// #   fn lost_lines(&self) -> u64 { 0 }
+    /// #   fn finish(self) -> Vec<LogCluster> { Vec::new() }
+    /// # }
+    /// # struct F; impl Formatter for F { fn format(&self, _: &[LogCluster]) -> String { String::new() } }
+    /// let counter = Arc::new(TiktokenCounter::new()?);
+    /// let (_, stats) = Pipeline::new(N, C, F)
+    ///     .with_token_counter(counter)
+    ///     .run(["error at 10:00"])?;
+    /// # let _ = stats;
+    /// # Ok::<(), ltk_core::LtkError>(())
+    /// ```
     pub struct TiktokenCounter {
         bpe: CoreBPE,
     }
@@ -500,11 +590,13 @@ pub mod tiktoken {
                 .map_err(|e| crate::LtkError::TiktokenLoad(e.to_string()))?;
             Ok(Self { bpe })
         }
+    }
 
+    impl crate::TokenCounter for TiktokenCounter {
         /// Exact token count for `text` (including special tokens).
-        #[must_use]
-        pub fn count(&self, text: &str) -> usize {
-            self.bpe.encode_with_special_tokens(text).len()
+        fn count(&self, text: &str) -> u64 {
+            let n = self.bpe.encode_with_special_tokens(text).len();
+            u64::try_from(n).unwrap_or(u64::MAX)
         }
     }
 
@@ -536,6 +628,39 @@ pub mod rpc;
 mod tests {
     use super::*;
 
+    /// Pass-through [`Normalizer`] used to exercise the pipeline scaffolding.
+    struct UnitNormalizer;
+
+    impl Normalizer for UnitNormalizer {
+        fn normalize<'a>(&self, raw: &'a str) -> NormalizedLine<'a> {
+            NormalizedLine::new(raw, Cow::Borrowed(raw), Vec::new())
+        }
+    }
+
+    /// Sink [`Clusterer`] used to exercise the pipeline scaffolding.
+    struct UnitClusterer;
+
+    impl Clusterer for UnitClusterer {
+        fn ingest(&mut self, _line: NormalizedLine<'_>) {}
+
+        fn lost_lines(&self) -> u64 {
+            0
+        }
+
+        fn finish(self) -> Vec<LogCluster> {
+            Vec::new()
+        }
+    }
+
+    /// Empty [`Formatter`] used to exercise the pipeline scaffolding.
+    struct UnitFormatter;
+
+    impl Formatter for UnitFormatter {
+        fn format(&self, _clusters: &[LogCluster]) -> String {
+            String::new()
+        }
+    }
+
     #[test]
     fn placeholder_renders_canonical_tags() {
         assert_eq!(Placeholder::Ip.as_str(), "<IP>");
@@ -561,6 +686,29 @@ mod tests {
     fn output_format_default_is_compact() {
         assert_eq!(OutputFormat::default(), OutputFormat::Compact);
         assert_eq!(OutputFormat::Tsv.as_str(), "tsv");
+    }
+
+    #[test]
+    fn boxed_formatter_delegates_to_the_inner_formatter() {
+        let boxed: Box<dyn Formatter> = Box::new(CompactFormatter::new());
+        let out = boxed.format(&[LogCluster::new("boom".into(), 2, Box::new([]))]);
+        assert_eq!(out, "[x2] boom\n");
+    }
+
+    #[test]
+    fn output_format_display_matches_the_cli_name() {
+        assert_eq!(OutputFormat::Compact.to_string(), "compact");
+        assert_eq!(OutputFormat::Toon.to_string(), "toon");
+        assert_eq!(OutputFormat::JsonMinimal.to_string(), "json-minimal");
+    }
+
+    #[test]
+    fn pipeline_debug_reports_its_configuration() {
+        let pipeline = Pipeline::new(UnitNormalizer, UnitClusterer, UnitFormatter);
+        let rendered = format!("{pipeline:?}");
+        assert!(rendered.contains("Pipeline"), "{rendered}");
+        assert!(rendered.contains("target_rate"), "{rendered}");
+        assert!(rendered.contains("has_compressor"), "{rendered}");
     }
 
     #[test]

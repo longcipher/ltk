@@ -1,0 +1,15 @@
+# `just mutation` runs cargo-mutants against the default-feature build.
+#
+# Mutants in code that the build never compiles can never be killed - the
+# mutation lands in text the compiler drops - so they are excluded rather than
+# reported as missed:
+#
+#   * `onnx.rs` / `rpc.rs` - Stage 2 backends, gated behind the `llmlingua-*`
+#     features and additionally requiring a model file or a live daemon.
+#   * `run_token_counter` - gated behind the CLI's `token-counter` feature.
+#   * `tiktoken::` - gated behind the `tiktoken` feature.
+#
+# Those paths keep their own unit tests; `just test-all` builds and runs them
+# with `--all-features`.
+exclude_globs = ["crates/ltk-core/src/onnx.rs", "crates/ltk-core/src/rpc.rs"]
+exclude_re = ["run_token_counter", "tiktoken::"]

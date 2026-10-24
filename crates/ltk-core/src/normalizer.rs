@@ -274,6 +274,30 @@ mod tests {
     }
 
     #[test]
+    fn tokenize_maps_every_placeholder_tag_to_a_mask() -> Result<(), Box<dyn Error>> {
+        // Masking and tokenizing are separate steps: the tags must come back as
+        // `Token::Mask`, not as `Token::Lit` (which would render identically but
+        // cluster differently).
+        let norm = n()?;
+        let toks = norm.normalize("<IP> <UUID> <TS> <HEX> <NUM> <PORT> <PATH> word").tokens;
+        let expected = [
+            Placeholder::Ip,
+            Placeholder::Uuid,
+            Placeholder::Timestamp,
+            Placeholder::Hex,
+            Placeholder::Number,
+            Placeholder::Port,
+            Placeholder::Path,
+        ];
+        assert_eq!(toks.len(), expected.len() + 1);
+        for (got, want) in toks.iter().zip(expected) {
+            assert_eq!(*got, Token::Mask(want));
+        }
+        assert!(matches!(toks.last(), Some(Token::Lit(_))));
+        Ok(())
+    }
+
+    #[test]
     fn two_lines_differing_only_in_ip_mask_identically() -> Result<(), Box<dyn Error>> {
         let norm = n()?;
         let a = masked(&norm, "Failed to connect to 192.168.1.10:5432 refused");

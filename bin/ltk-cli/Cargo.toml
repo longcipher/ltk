@@ -13,6 +13,7 @@ path = "src/main.rs"
 [features]
 llmlingua-onnx = ["ltk-core/llmlingua-onnx"]
 llmlingua-rpc = ["ltk-core/llmlingua-rpc"]
+tiktoken = ["ltk-core/tiktoken"]
 token-counter = ["dep:tokenizers"]
 
 [dependencies]

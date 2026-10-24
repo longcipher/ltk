@@ -16,6 +16,13 @@
 //!
 //! `jaccard([], []) == 1.0` (two empty-token lines are treated as identical),
 //! matching the reference implementation.
+//!
+//! ## Line accounting
+//!
+//! Eviction never loses a line silently: when the LRU victim has no surviving
+//! cluster to merge into (i.e. `max_clusters == 1`), its count is recorded in
+//! [`lost_lines`](JaccardClusterer::lost_lines) instead of being dropped, so callers
+//! can assert `sum(cluster.count) + lost_lines == ingested lines`.
 
 use ahash::AHashSet;
 
@@ -37,6 +44,8 @@ pub struct JaccardClusterer {
     max_clusters: usize,
     /// Head (index 0) = most recently touched; tail = LRU victim.
     clusters: Vec<ClusterEntry>,
+    /// Lines whose cluster was evicted with no surviving cluster to merge into.
+    lost_lines: u64,
 }
 
 #[derive(Debug)]
@@ -62,7 +71,12 @@ impl JaccardClusterer {
     /// and `max_clusters` window (`0` = unbounded).
     #[must_use]
     pub const fn with_params(threshold: f64, max_clusters: usize) -> Self {
-        Self { threshold: threshold.clamp(0.0, 1.0), max_clusters, clusters: Vec::new() }
+        Self {
+            threshold: threshold.clamp(0.0, 1.0),
+            max_clusters,
+            clusters: Vec::new(),
+            lost_lines: 0,
+        }
     }
 
     /// Current number of live clusters.
@@ -76,6 +90,16 @@ impl JaccardClusterer {
     pub const fn is_empty(&self) -> bool {
         self.clusters.is_empty()
     }
+
+    /// Number of ingested lines whose cluster was evicted with no surviving
+    /// cluster to merge its count into.
+    ///
+    /// Always `0` unless `max_clusters == 1`: with two or more live clusters the
+    /// evicted count is merged into the nearest survivor instead.
+    #[must_use]
+    pub const fn lost_lines(&self) -> u64 {
+        self.lost_lines
+    }
 }
 
 impl Default for JaccardClusterer {
@@ -85,6 +109,10 @@ impl Default for JaccardClusterer {
 }
 
 impl Clusterer for JaccardClusterer {
+    fn lost_lines(&self) -> u64 {
+        self.lost_lines
+    }
+
     fn ingest(&mut self, line: NormalizedLine<'_>) {
         // Borrowed token set for the incoming line (zero-clone). The borrow on
         // `line.tokens` ends after the scan, so `line.tokens` can still be
@@ -125,6 +153,11 @@ impl Clusterer for JaccardClusterer {
                     .map(|(i, _)| i)
                 {
                     self.clusters[best_idx].count += victim.count;
+                } else {
+                    // No survivor (window of 1): the victim's lines cannot be
+                    // merged anywhere, so account for them instead of dropping
+                    // them silently.
+                    self.lost_lines += victim.count;
                 }
             }
             let template = line.masked.to_string();
@@ -248,6 +281,57 @@ mod tests {
         // C is new.
         let c_cluster = clusters.iter().find(|x| x.template == "c line");
         assert_eq!(c_cluster.map(|x| x.count), Some(1));
+    }
+
+    #[test]
+    fn len_and_is_empty_track_live_clusters() {
+        let mut c = JaccardClusterer::new();
+        assert!(c.is_empty());
+        assert_eq!(c.len(), 0);
+        c.ingest(nl("alpha", vec![lit("alpha")]));
+        c.ingest(nl("beta", vec![lit("beta")]));
+        assert!(!c.is_empty());
+        assert_eq!(c.len(), 2);
+    }
+
+    #[test]
+    fn window_of_one_records_lost_lines() {
+        // Window of 1: each new cluster evicts the only live cluster and there
+        // is no survivor to merge into, so the evicted lines are reported as
+        // lost rather than silently dropped.
+        let mut c = JaccardClusterer::with_params(1.0, 1);
+        c.ingest(nl("alpha", vec![lit("alpha")]));
+        c.ingest(nl("beta", vec![lit("beta")]));
+        c.ingest(nl("gamma", vec![lit("gamma")]));
+        let lost = c.lost_lines();
+        let clusters = c.finish();
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].template, "gamma");
+        assert_eq!(lost, 2);
+        // Accounting invariant: counts + lost == ingested.
+        let total: u64 = clusters.iter().map(|x| x.count).sum();
+        assert_eq!(total + lost, 3);
+    }
+
+    #[test]
+    fn window_of_two_or_more_loses_nothing() {
+        let mut c = JaccardClusterer::with_params(1.0, 2);
+        c.ingest(nl("alpha", vec![lit("alpha")]));
+        c.ingest(nl("beta", vec![lit("beta")]));
+        c.ingest(nl("gamma", vec![lit("gamma")]));
+        assert_eq!(c.lost_lines(), 0);
+        let clusters = c.finish();
+        let total: u64 = clusters.iter().map(|x| x.count).sum();
+        assert_eq!(total, 3);
+    }
+
+    #[test]
+    fn unbounded_window_never_loses_lines() {
+        let mut c = JaccardClusterer::new();
+        for w in ["alpha", "beta", "gamma", "delta"] {
+            c.ingest(nl(w, vec![lit(w)]));
+        }
+        assert_eq!(c.lost_lines(), 0);
     }
 
     #[test]

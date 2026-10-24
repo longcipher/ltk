@@ -228,6 +228,20 @@ mod tests {
     }
 
     #[test]
+    fn json_minimal_comma_separates_multiple_clusters() {
+        let f = JsonMinimalFormatter::new();
+        let out = f.format(&[cluster("alpha", 1), cluster("beta", 2)]);
+        assert_eq!(out, r#"[{"count":1,"template":"alpha"},{"count":2,"template":"beta"}]"#);
+    }
+
+    #[test]
+    fn json_minimal_escapes_quotes_and_backslashes() {
+        let f = JsonMinimalFormatter::new();
+        let out = f.format(&[cluster(r#"say "hi" \ ok"#, 1)]);
+        assert_eq!(out, r#"[{"count":1,"template":"say \"hi\" \\ ok"}]"#);
+    }
+
+    #[test]
     fn push_u64_various_values() {
         let mut buf = String::new();
         push_u64(&mut buf, 0);

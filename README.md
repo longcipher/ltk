@@ -37,7 +37,7 @@ Telegram achieves higher compression because its 100k messages are highly repeti
 
 Discord has more diverse conversation content across multiple channels, so fewer lines collapse into the same cluster.
 
-**Data integrity**: all `[xN]` counts sum to the exact original line count — zero information loss.
+**Data integrity**: all `[xN]` counts sum to the exact original line count — zero information loss. The only exception is `--window 1`, where an evicted cluster has no surviving cluster to merge into; those lines are reported separately as `lost lines` in `--stats`, so `sum([xN]) + lost lines == raw lines` always holds.
 
 ## Quick Start
 
@@ -60,6 +60,10 @@ cat *.log | ./target/debug/ltk --stats > compressed.txt
 # Token counter (requires --features token-counter)
 cargo build -p ltk-cli --features token-counter
 ./target/debug/ltk token-counter raw1.md raw2.md --compressed compressed1.txt --compressed compressed2.txt
+
+# Exact OpenAI token counts in --stats (requires --features tiktoken)
+cargo build -p ltk-cli --features tiktoken
+./target/debug/ltk --stats input.log > compressed.txt
 ```
 
 ## CLI Options
@@ -79,12 +83,20 @@ Options:
       --rpc-endpoint <URL>       Stage 2 LLMLingua daemon URL (requires llmlingua-rpc)
 ```
 
+`--onnx-model` and `--onnx-tokenizer` must be given together, `--onnx-model` and
+`--rpc-endpoint` are mutually exclusive, and passing any of them to a build that
+was not compiled with the matching feature is a hard error (`ltk` never silently
+falls back to the rule-based pipeline).
+
+`--stats` reports which token counter is in use: the built-in 4-bytes-per-token
+heuristic, or exact `cl100k_base` counts when built with `--features tiktoken`.
+
 ## Feature Flags
 
 | Feature | Default | Adds |
 |---------|---------|------|
 | `default` | yes | Stage 0/1/3 — zero-model, sub-5ms rule-based mode |
-| `tiktoken` | no | Accurate OpenAI token counting for savings stats |
+| `tiktoken` | no | Accurate OpenAI (`cl100k_base`) token counting for `--stats` |
 | `llmlingua-onnx` | no | Stage 2 local neural pruning via ONNX Runtime |
 | `llmlingua-rpc` | no | Stage 2 remote neural pruning via HTTP daemon |
 | `token-counter` | no | BPE token counter subcommand (`ltk token-counter`) |
@@ -94,11 +106,11 @@ Options:
 ```text
 bin/
   ltk-cli/          ltk CLI binary (clap), with optional token-counter subcommand
+                    tests/cli.rs — binary smoke tests
 crates/
   ltk-core/         core library: normalizer, clusterer, formatter, pipeline, onnx, rpc
-features/
-  checkout.feature   BDD checkout scenario (template demo)
-  pipeline.feature   BDD ltk pipeline scenarios
+                    tests/proptest.rs — clustering invariants
+                    tests/pipeline.rs — end-to-end cascade tests
 ```
 
 ## Testing
