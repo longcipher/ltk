@@ -2,3 +2,11 @@
 pipelining = true
 jobs = 10
 rustc-wrapper = "kache"
+warnings = "deny"
+
+[resolver]
+incompatible-rust-versions = "fallback"
+
+[registry]
+default = "crates-io"
+global-min-publish-age = "5 days"

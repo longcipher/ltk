@@ -42,16 +42,19 @@ temp file and run `cargo mutants --in-diff <diff-file>` for that file only, with
 60 mutants / 300 s. Never add a whole-repo mutation recipe: `just check-mutation-scope` fails
 `just lint` when an unbounded mutation command appears in a build or CI file.
 
-`just lint` is exactly the tool set CI installs: `typos`, `rumdl`, `cargo sort -w -g -c`, `cargo +nightly fmt --check`, `cargo +nightly clippy --all -- -D warnings`, `cargo shear`. `just test-all` additionally covers the optional feature combinations.
+`just lint` is exactly the tool set CI installs: `typos`, `rumdl`, `cargo sort -w -g -c`, `cargo +nightly fmt --check`, `cargo +nightly clippy --all -- -D warnings`. `just test-all` additionally covers the optional feature combinations.
 
 ## Workspace rules
 
 - Never hand-type dependency versions. Add per-crate deps with `cargo add <crate> -p <crate>`. Shared deps go into root `[workspace.dependencies]` (numeric versions only, no default features) and are referenced with `dep = { workspace = true }`.
-- Sub-crates inherit `version`/`edition`/`license`/`repository` via `workspace = true` and must set `[lints] workspace = true`.
+- Sub-crates inherit `version`/`edition`/`license`/`repository`/`rust-version` via `workspace = true` and must set `[lints] workspace = true`.
 - There is no `rust-toolchain.toml`; CI installs a nightly toolchain, so use `cargo +nightly fmt` and `cargo +nightly clippy` exactly as the Justfile does.
 - `.cargo/config.toml` sets `rustc-wrapper = "kache"`, which breaks clippy's lints and `--fix`: prefix clippy with `RUSTC_WRAPPER=` (the Justfile does; CI sets `RUSTC_WRAPPER: ""` for the same reason).
 - `allow_attributes` is `deny`, and the tree currently uses no `#[allow]`/`#[expect]` escape hatch at all. `unwrap_used`, `expect_used`, `panic`, `todo`, `unimplemented`, `dbg_macro`, `print_stdout` and `print_stderr` are denied as well.
-- Every entry in the root `[workspace.dependencies]` table is referenced by at least one crate today. `cargo shear` must stay green, so delete an entry as soon as nothing uses it instead of leaving it reserved.
+- Every entry in the root `[workspace.dependencies]` table is referenced by at least one crate today. Cargo's native `unused_dependencies` lint must stay green, so delete an entry as soon as nothing uses it instead of leaving it reserved.
+- Workspace MSRV is Rust 1.100. Prefer newly stabilized features and APIs over older workarounds; do not add feature gates for anything already stable in 1.100.
+- `[workspace.lints.cargo]` enables Cargo's native `unused_dependencies` lint, the only unused-dependency check; do not reintroduce a third-party checker. Its level is `warn`, and `.cargo/config.toml` sets `build.warnings = "deny"`, so a finding fails the gate.
+- `.cargo/config.toml` sets resolver `incompatible-rust-versions = "fallback"` (MSRV-aligned resolution) and `registry.global-min-publish-age = "5 days"` (Rust 1.100 dependency cooldown); keep both.
 
 ## Dependency choices
 

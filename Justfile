@@ -20,7 +20,6 @@ lint:
   cargo sort -w -g -c
   cargo +nightly fmt --all -- --check
   RUSTC_WRAPPER= cargo +nightly clippy --all -- -D warnings
-  cargo shear
   just check-mutation-scope
 
 # Run tests
@@ -189,7 +188,6 @@ clean:
 
 # Install all required development tools
 setup:
-  cargo install cargo-shear
   cargo install cargo-sort
   cargo install typos-cli
   cargo install rumdl
@@ -223,10 +221,6 @@ test-nextest:
 # Run miri on unsafe code
 miri:
   cargo +nightly miri test --all-features
-
-# Check for unused dependencies
-unused-deps:
-  cargo shear --check
 
 # Update all dependencies
 update-deps:

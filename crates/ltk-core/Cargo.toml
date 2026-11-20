@@ -7,6 +7,7 @@ description = "Less Token — cascade log compression core library (normalizer, 
 repository.workspace = true
 keywords = ["llm", "logs", "compression", "llmlingua", "token"]
 categories = ["command-line-utilities", "text-processing"]
+rust-version.workspace = true
 
 [features]
 # Fast rule-based mode: Normalizer + Clusterer + Formatter only (zero model, < 5 ms overhead).

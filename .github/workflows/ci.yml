@@ -22,6 +22,6 @@ jobs:
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: just,cargo-shear,cargo-sort,typos-cli,rumdl
+          tool: just,cargo-sort,typos-cli,rumdl
 
       - run: just ci
