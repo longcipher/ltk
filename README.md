@@ -118,7 +118,7 @@ crates/
 ```bash
 just test       # unit tests + property tests
 just test-all   # everything
-just lint       # clippy + typos + cargo shear
+just lint       # clippy + typos
 just format     # rustfmt + cargo sort
 just ci         # lint + test-all + build
 ```
